@@ -1,6 +1,8 @@
 import telebot, sqlite3, random, string, json
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
-from datetime import datetime
+from datetime import datetime, timedelta
+import threading
+import time
 
 TOKEN = "8786999967:AAEroloekTowptAPq9TcfqLTYqq_uCVXAFw"
 ADMIN_ID = 6694632981
@@ -8,7 +10,7 @@ bot = telebot.TeleBot(TOKEN)
 
 conn = sqlite3.connect("store.db", check_same_thread=False)
 cur = conn.cursor()
-cur.execute("""CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY, nombre TEXT, saldo REAL DEFAULT 0, gastado REAL DEFAULT 0, logueado INTEGER DEFAULT 0, login TEXT, password TEXT, es_vip INTEGER DEFAULT 0)""")
+cur.execute("""CREATE TABLE IF NOT EXISTS usuarios (id INTEGER PRIMARY KEY, nombre TEXT, saldo REAL DEFAULT 0, gastado REAL DEFAULT 0, logueado INTEGER DEFAULT 0, login TEXT, password TEXT, es_vip INTEGER DEFAULT 0, fecha_registro TEXT)""")
 cur.execute("""CREATE TABLE IF NOT EXISTS compras (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, producto TEXT, precio REAL, fecha TEXT, key_codigo TEXT)""")
 cur.execute("""CREATE TABLE IF NOT EXISTS keys (id INTEGER PRIMARY KEY AUTOINCREMENT, codigo TEXT UNIQUE, plataforma TEXT, dias INTEGER, precio REAL, usada INTEGER DEFAULT 0, user_id INTEGER DEFAULT 0)""")
 cur.execute("""CREATE TABLE IF NOT EXISTS recargas (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, monto REAL, metodo TEXT, estado TEXT DEFAULT 'pendiente', fecha TEXT)""")
@@ -19,6 +21,14 @@ conn.commit()
 
 try:
     cur.execute("ALTER TABLE usuarios ADD COLUMN es_vip INTEGER DEFAULT 0")
+    conn.commit()
+except:
+    pass
+
+try:
+    cur.execute("ALTER TABLE usuarios ADD COLUMN fecha_registro TEXT")
+    cur.execute("UPDATE usuarios SET fecha_registro=? WHERE fecha_registro IS NULL",
+                (datetime.now().strftime("%Y-%m-%d"),))
     conn.commit()
 except:
     pass
@@ -99,8 +109,8 @@ def get_paises():
 def registrar(user):
     cur.execute("SELECT id FROM usuarios WHERE id=?", (user.id,))
     if not cur.fetchone():
-        cur.execute("INSERT INTO usuarios (id, nombre, login, password) VALUES (?,?,?,?)",
-                    (user.id, user.first_name.strip(), None, None))
+        cur.execute("INSERT INTO usuarios (id, nombre, login, password, fecha_registro) VALUES (?,?,?,?,?)",
+                    (user.id, user.first_name.strip(), None, None, datetime.now().strftime("%Y-%m-%d")))
         conn.commit()
 
 def get_user(uid):
@@ -127,6 +137,47 @@ def get_rango(gastado):
         if r["min"] <= gastado <= r["max"]:
             return r
     return RANGOS[-1]
+
+def get_descuento(uid, gastado):
+    rango = get_rango(gastado)
+    desc_rango = rango['desc']
+    descuentos_esp = cargar_config("descuentos_usuarios", {})
+    desc_esp = descuentos_esp.get(str(uid), 0)
+    return max(desc_rango, desc_esp)
+
+def limpiar_usuarios_inactivos():
+    while True:
+        try:
+            limite = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            cur.execute("""
+                SELECT id FROM usuarios
+                WHERE fecha_registro <= ?
+                AND id NOT IN (SELECT DISTINCT user_id FROM recargas)
+                AND id != ?
+            """, (limite, ADMIN_ID))
+            a_borrar = cur.fetchall()
+            for (uid_b,) in a_borrar:
+                try:
+                    bot.send_message(uid_b,
+                        "⚠️ *Tu cuenta ha sido eliminada*\n"
+                        "No registraste ninguna recarga en 7 dias.\n"
+                        "Puedes volver a registrarte cuando quieras.",
+                        parse_mode="Markdown")
+                except:
+                    pass
+                cur.execute("DELETE FROM usuarios WHERE id=?", (uid_b,))
+                cur.execute("DELETE FROM movimientos WHERE user_id=?", (uid_b,))
+            conn.commit()
+            if a_borrar:
+                bot.send_message(ADMIN_ID,
+                    "🗑️ *Limpieza automatica*\n"
+                    + str(len(a_borrar)) + " usuario(s) eliminados por inactividad.",
+                    parse_mode="Markdown")
+        except:
+            pass
+        time.sleep(86400)
+
+threading.Thread(target=limpiar_usuarios_inactivos, daemon=True).start()
 
 def edit_msg(call, texto, kb):
     try:
@@ -217,7 +268,7 @@ def start(msg):
     uid = msg.from_user.id
     clear_paso(uid)
     nombre = msg.from_user.first_name
-    bot.send_message(msg.chat.id, ".", reply_markup=ReplyKeyboardRemove())
+    bot.send_message(msg.chat.id, "\u200b", reply_markup=ReplyKeyboardRemove())
     bienvenida = (
         "🌿 *FzTeam Socios* 🍀\n"
         "━━━━━━━━━━━━━━━━\n\n"
@@ -304,7 +355,8 @@ def manejar_texto(msg):
         try:
             monto = float(texto)
             if monto < 5:
-                bot.send_message(msg.chat.id, "❌ Minimo $5 USD:")
+                bot.send_message(msg.chat.id, "❌ La recarga minima es *$5 USD*\nEscribe un monto mayor:",
+                                 parse_mode="Markdown")
                 return
             u = get_user(uid)
             cur.execute("INSERT INTO recargas VALUES (NULL,?,?,?,?,?)",
@@ -356,12 +408,13 @@ def manejar_texto(msg):
             if not u:
                 bot.send_message(msg.chat.id, "❌ Usuario no encontrado:")
                 return
+            cur.execute("INSERT OR IGNORE INTO admins VALUES (NULL,?)", (tid,))
             cur.execute("UPDATE usuarios SET es_vip=1 WHERE id=?", (tid,))
             conn.commit()
             clear_paso(uid)
-            bot.send_message(msg.chat.id, "🍀 *VIP asignado a " + u[1] + "*",
+            bot.send_message(msg.chat.id, "🍀 *Usuario VIP y Admin asignado a " + u[1] + "*",
                              parse_mode="Markdown", reply_markup=menu_admin())
-            bot.send_message(tid, "🍀 *Eres VIP ahora!*\nDisfruta tus beneficios exclusivos.",
+            bot.send_message(tid, "🍀 *Eres Usuario VIP ahora!*\nYa tienes acceso al panel de administracion.\nUsa /start",
                              parse_mode="Markdown")
         except:
             bot.send_message(msg.chat.id, "❌ ID invalido:")
@@ -381,7 +434,7 @@ def manejar_texto(msg):
             clear_paso(uid)
             bot.send_message(msg.chat.id, "🏷️ Descuento del " + str(descuento) + "% asignado a " + u[1],
                              reply_markup=menu_admin())
-            bot.send_message(tid, "🏷️ *Tienes un descuento especial del " + str(descuento) + "%!*",
+            bot.send_message(tid, "🏷️ *Tienes un descuento especial del " + str(descuento) + "%!*\nSe aplica automaticamente al comprar.",
                              parse_mode="Markdown")
         except:
             bot.send_message(msg.chat.id, "❌ Formato: ID PORCENTAJE\nEjemplo: 123456789 15")
@@ -418,9 +471,24 @@ def manejar_texto(msg):
                 d2, p2 = par.split(":")
                 productos[cat][prod][d2] = p2
             guardar_config("productos", productos)
-            bot.send_message(msg.chat.id, "✅ Actualizado", reply_markup=menu_admin())
+            bot.send_message(msg.chat.id, "✅ Precios actualizados", reply_markup=menu_admin())
         except:
             bot.send_message(msg.chat.id, "❌ Formato: 1:3 7:9 15:12 30:18")
+
+    elif paso == "rename_prod":
+        cat = get_datos(uid).get("cat", "")
+        prod_viejo = get_datos(uid).get("prod", "")
+        clear_paso(uid)
+        try:
+            productos = get_productos()
+            precios = productos[cat][prod_viejo]
+            del productos[cat][prod_viejo]
+            productos[cat][texto] = precios
+            guardar_config("productos", productos)
+            bot.send_message(msg.chat.id, "✅ Producto renombrado a *" + texto + "*",
+                             parse_mode="Markdown", reply_markup=menu_admin())
+        except:
+            bot.send_message(msg.chat.id, "❌ Error al renombrar")
 
     elif paso == "edit_pais":
         pais = get_datos(uid).get("pais", "")
@@ -484,6 +552,7 @@ def callbacks(call):
     elif d == "cli_cuenta":
         u = get_user(uid)
         rango = get_rango(u[3])
+        desc = get_descuento(uid, u[3])
         vip_txt = " 🍀 VIP" if es_vip(uid) else ""
         kb = InlineKeyboardMarkup()
         kb.add(InlineKeyboardButton("🔙 Volver", callback_data="volver_cliente"))
@@ -494,7 +563,7 @@ def callbacks(call):
                  "💳 Saldo: $" + str(round(u[2], 2)) + "\n"
                  "🛒 Gastado: $" + str(round(u[3], 2)) + "\n"
                  "🏆 Rango: " + rango['nombre'] + "\n"
-                 "🏷️ Descuento: " + str(rango['desc']) + "%\n"
+                 "🏷️ Descuento actual: " + str(desc) + "%\n"
                  "━━━━━━━━━━━━━━━━", kb)
 
     elif d == "cli_historial_compras":
@@ -524,7 +593,11 @@ def callbacks(call):
             edit_msg(call, t, kb)
 
     elif d == "cli_recargas":
-        edit_msg(call, "💰 *Elige tu metodo de pago:*\n\n💵 *Recarga Minima: 5 USD*\n\nEjemplo: 10", menu_paises_kb())
+        edit_msg(call,
+                 "💰 *Elige tu metodo de pago:*\n\n"
+                 "💵 *Recarga Minima: $5 USD*\n\n"
+                 "Ejemplo: 10",
+                 menu_paises_kb())
 
     elif d == "cli_historial_recarga":
         cur.execute("SELECT tipo, monto, fecha FROM movimientos WHERE user_id=?", (uid,))
@@ -545,7 +618,16 @@ def callbacks(call):
         rango = get_rango(u[3])
         idx = RANGOS.index(rango)
         sig = RANGOS[idx+1] if idx+1 < len(RANGOS) else None
-        t = "🏆 *" + rango['nombre'] + "*\n🏷️ " + str(rango['desc']) + "% descuento\n💰 Gastado: $" + str(round(u[3],2))
+        desc = get_descuento(uid, u[3])
+        t = ("🏆 *" + rango['nombre'] + "*\n"
+             "🏷️ Descuento actual: " + str(desc) + "%\n"
+             "💰 Gastado: $" + str(round(u[3],2)) + "\n\n"
+             "📊 *Rangos y descuentos:*\n"
+             "👤 USUARIO: $0-$49 → 0%\n"
+             "⭐ VIP: $50-$149 → 5%\n"
+             "💎 PREMIUM: $150-$249 → 10%\n"
+             "💠 DIAMOND: $250-$499 → 15%\n"
+             "👑 DELUXE: $500+ → 20%")
         if sig:
             t += "\n\n⬆️ Siguiente: *" + sig['nombre'] + "*\nFaltan: $" + str(round(sig['min']-u[3],2))
         kb = InlineKeyboardMarkup()
@@ -673,11 +755,17 @@ def callbacks(call):
 
     elif d == "admin_crear_vip":
         set_paso(uid, "crear_vip")
-        bot.send_message(call.message.chat.id, "🍀 Escribe el ID del usuario para hacerlo VIP:")
+        bot.send_message(call.message.chat.id, "🍀 Escribe el ID del usuario para hacerlo VIP Admin:")
 
     elif d == "admin_agregar_descuento":
         set_paso(uid, "agregar_descuento")
-        bot.send_message(call.message.chat.id, "🏷️ Escribe: ID PORCENTAJE\nEjemplo: 123456789 15")
+        bot.send_message(call.message.chat.id,
+                         "🏷️ Escribe: ID PORCENTAJE\nEjemplo: 123456789 15\n\n"
+                         "📊 *Rangos automaticos por gasto:*\n"
+                         "$0-$49 → 0% | $50-$149 → 5%\n"
+                         "$150-$249 → 10% | $250-$499 → 15%\n"
+                         "$500+ → 20%",
+                         parse_mode="Markdown")
 
     elif d == "admin_stats":
         cur.execute("SELECT COUNT(*) FROM usuarios")
@@ -711,11 +799,7 @@ def callbacks(call):
         dias = partes[2]
         precio = float(partes[3])
         u = get_user(uid)
-        rango = get_rango(u[3])
-        desc = rango['desc']
-        descuentos_esp = cargar_config("descuentos_usuarios", {})
-        if str(uid) in descuentos_esp:
-            desc = max(desc, descuentos_esp[str(uid)])
+        desc = get_descuento(uid, u[3])
         pf = round(precio * (1 - desc/100), 2)
         plataforma = cat + "-" + prod
         cur.execute("SELECT id, codigo FROM keys WHERE plataforma=? AND dias=? AND usada=0 LIMIT 1",
@@ -815,18 +899,37 @@ def callbacks(call):
         cat = d[9:]
         kb = InlineKeyboardMarkup(row_width=1)
         for prod in get_productos()[cat].keys():
-            kb.add(InlineKeyboardButton(prod, callback_data="edit_prod_" + cat + "|" + prod))
+            kb.add(InlineKeyboardButton("✏️ " + prod, callback_data="edit_prod_" + cat + "|" + prod))
         kb.add(InlineKeyboardButton("🔙 Volver", callback_data="admin_editar_precios"))
-        edit_msg(call, "⚙️ *" + cat + "*", kb)
+        edit_msg(call, "⚙️ *" + cat + "* - Elige producto:", kb)
 
     elif d.startswith("edit_prod_"):
         partes = d[10:].split("|")
         cat = partes[0]
         prod = partes[1]
+        kb = InlineKeyboardMarkup(row_width=1)
+        kb.add(InlineKeyboardButton("💰 Editar Precios", callback_data="editprecio_" + cat + "|" + prod))
+        kb.add(InlineKeyboardButton("✏️ Renombrar Producto", callback_data="renameprod_" + cat + "|" + prod))
+        kb.add(InlineKeyboardButton("🔙 Volver", callback_data="edit_cat_" + cat))
+        edit_msg(call, "⚙️ *" + prod + "*\n\n¿Que deseas editar?", kb)
+
+    elif d.startswith("editprecio_"):
+        partes = d[11:].split("|")
+        cat = partes[0]
+        prod = partes[1]
         set_paso(uid, "edit_precio", {"cat": cat, "prod": prod})
         pa = " ".join([k+":"+v for k, v in get_productos()[cat][prod].items()])
         bot.send_message(call.message.chat.id,
-                         "⚙️ *" + prod + "*\nActual: `" + pa + "`\n\nNuevo formato: `1:3 7:9 15:12 30:18`",
+                         "💰 *" + prod + "*\nActual: `" + pa + "`\n\nNuevo formato: `1:3 7:9 15:12 30:18`",
+                         parse_mode="Markdown")
+
+    elif d.startswith("renameprod_"):
+        partes = d[11:].split("|")
+        cat = partes[0]
+        prod = partes[1]
+        set_paso(uid, "rename_prod", {"cat": cat, "prod": prod})
+        bot.send_message(call.message.chat.id,
+                         "✏️ *Renombrar:* `" + prod + "`\n\nEscribe el nuevo nombre:",
                          parse_mode="Markdown")
 
     elif d.startswith("edit_pais_"):
@@ -880,4 +983,4 @@ def callbacks(call):
                              parse_mode="Markdown", reply_markup=menu_cliente())
 
 print("✅ BOT FUNCIONANDO")
-bot.infinity_polling()
+bot.infinity_polling)
