@@ -983,4 +983,4 @@ def callbacks(call):
                              parse_mode="Markdown", reply_markup=menu_cliente())
 
 print("✅ BOT FUNCIONANDO")
-bot.infinity_polling)
+bot.infinity_polling()
