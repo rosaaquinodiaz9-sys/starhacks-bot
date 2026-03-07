@@ -4,7 +4,8 @@ from datetime import datetime, timedelta
 import threading
 import time
 
-TOKEN = "8786999967:AAEroloekTowptAPq9TcfqLTYqq_uCVXAFw"
+import os
+TOKEN = os.getenv('FzTEAM_PREMUIN_BOT')
 ADMIN_ID = 6694632981
 bot = telebot.TeleBot(TOKEN)
 
